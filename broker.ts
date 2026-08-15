@@ -26,7 +26,7 @@ import type {
 
 const PORT = parseInt(process.env.PORT ?? process.env.CLAUDE_PEERS_PORT ?? "3000", 10);
 const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME ?? "/tmp"}/.claude-peers-cloud.db`;
-const TOKEN = process.env.CLADE_PEERS_TOKEN ?? process.env.CLAUDE_PEERS_TOKEN ?? "";
+const TOKEN = process.env.CLAUDE_PEERS_TOKEN ?? "";
 const STALE_MS = 2 * 60 * 1000; // drop peers not seen in 2 minutes
 
 // --- Database setup ---
@@ -171,6 +171,60 @@ function handleUnregister(body: { id: string }): void {
   deletePeer.run(body.id);
 }
 
+// --- Bootstrap (unauthenticated) ---
+//
+// A new machine can install the MCP client without any GitHub access:
+//   curl -fsSL https://<broker>/install | bash -s -- <TOKEN> <owner>
+//
+// Only the client-side files are served, and only from this explicit
+// allowlist. broker.ts, .env* and everything else stay unreachable.
+
+const SERVABLE_FILES = new Set(["server.ts", "package.json", "shared/types.ts"]);
+
+function installScript(brokerUrl: string): string {
+  return `#!/usr/bin/env bash
+# claude-peers-cloud installer
+# Usage: curl -fsSL ${brokerUrl}/install | bash -s -- <TOKEN> [owner]
+set -euo pipefail
+
+BROKER_URL="${brokerUrl}"
+TOKEN="\${1:-\${CLAUDE_PEERS_TOKEN:-}}"
+OWNER="\${2:-\${CLAUDE_PEERS_OWNER:-\$(whoami)}}"
+DIR="\${CLAUDE_PEERS_DIR:-\$HOME/claude-peers-cloud}"
+
+if [ -z "\$TOKEN" ]; then
+  echo "error: no token given." >&2
+  echo "usage: curl -fsSL \$BROKER_URL/install | bash -s -- <TOKEN> [owner]" >&2
+  exit 1
+fi
+
+command -v bun >/dev/null || { echo "error: bun is required (https://bun.sh)" >&2; exit 1; }
+command -v claude >/dev/null || { echo "error: claude CLI is required" >&2; exit 1; }
+
+echo "==> Fetching client into \$DIR"
+mkdir -p "\$DIR/shared"
+for f in server.ts package.json shared/types.ts; do
+  curl -fsSL "\$BROKER_URL/files/\$f" -o "\$DIR/\$f"
+done
+
+echo "==> Installing dependencies"
+(cd "\$DIR" && bun install)
+
+echo "==> Registering MCP server (owner: \$OWNER)"
+claude mcp remove --scope user claude-peers-cloud 2>/dev/null || true
+claude mcp add --scope user --transport stdio claude-peers-cloud \\
+  --env CLAUDE_PEERS_BROKER_URL="\$BROKER_URL" \\
+  --env CLAUDE_PEERS_TOKEN="\$TOKEN" \\
+  --env CLAUDE_PEERS_OWNER="\$OWNER" \\
+  -- bun "\$DIR/server.ts"
+
+echo
+echo "==> Done. Start Claude Code with:"
+echo "    claude --dangerously-load-development-channels server:claude-peers-cloud"
+echo "==> Then ask: 'List all peers on the network'"
+`;
+}
+
 // --- HTTP Server ---
 
 function authorized(req: Request): boolean {
@@ -189,6 +243,25 @@ Bun.serve({
     // health check (no auth)
     if (path === "/health") {
       return Response.json({ status: "ok", peers: (selectAllPeers.all() as Peer[]).length });
+    }
+
+    // bootstrap (no auth): install script + client-side source files
+    if (path === "/install" && req.method === "GET") {
+      return new Response(installScript(url.origin), {
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+      });
+    }
+
+    if (path.startsWith("/files/") && req.method === "GET") {
+      const name = path.slice("/files/".length);
+      if (!SERVABLE_FILES.has(name)) {
+        return Response.json({ error: "not found" }, { status: 404 });
+      }
+      const file = Bun.file(`${import.meta.dir}/${name}`);
+      if (!(await file.exists())) {
+        return Response.json({ error: "not found" }, { status: 404 });
+      }
+      return new Response(file, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
     }
 
     if (!authorized(req)) {

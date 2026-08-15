@@ -1,27 +1,21 @@
 #!/usr/bin/env bash
-# Setup claude-peers-cloud MCP on your brother's machine (one command).
-# Usage: bash setup-brother.sh
-set -e
+# Setup claude-peers-cloud MCP on a second machine.
+#
+# The token is NEVER stored in this file. Pass it as an argument:
+#   bash setup-brother.sh <TOKEN> [owner]
+#
+# Or, without cloning this repo at all (recommended for a remote machine):
+#   curl -fsSL https://claude-peers-cloud-production.up.railway.app/install | bash -s -- <TOKEN> <owner>
+set -euo pipefail
 
-REPO_DIR="$HOME/claude-peers-cloud"
-BROKER_URL="https://claude-peers-cloud-production.up.railway.app"
-TOKEN="2f8e9b1c4d6a7e0f3b5c8d1a2e4f6b9c0d3e5f7a8b1c2d4e6f8a0b2c4d6e8f0"
-OWNER="brother"
+BROKER_URL="${CLAUDE_PEERS_BROKER_URL:-https://claude-peers-cloud-production.up.railway.app}"
+TOKEN="${1:-${CLAUDE_PEERS_TOKEN:-}}"
+OWNER="${2:-${CLAUDE_PEERS_OWNER:-$(whoami)}}"
 
-echo "==> Cloning repo..."
-if [ ! -d "$REPO_DIR" ]; then
-  git clone https://github.com/ABAELGARCH/claude-peers-cloud.git "$REPO_DIR"
+if [ -z "$TOKEN" ]; then
+  echo "error: no token given." >&2
+  echo "usage: bash setup-brother.sh <TOKEN> [owner]" >&2
+  exit 1
 fi
-cd "$REPO_DIR"
-bun install
 
-echo "==> Registering MCP server (owner: $OWNER)..."
-claude mcp add --scope user --transport stdio claude-peers-cloud \
-  --env CLAUDE_PEERS_BROKER_URL="$BROKER_URL" \
-  --env CLAUDE_PEERS_TOKEN="$TOKEN" \
-  --env CLAUDE_PEERS_OWNER="$OWNER" \
-  -- bun "$REPO_DIR/server.ts"
-
-echo "==> Done. Start Claude Code with:"
-echo "    claude --dangerously-load-development-channels server:claude-peers-cloud"
-echo "==> Then ask: 'List all peers on the network'"
+exec bash -c "$(curl -fsSL "$BROKER_URL/install")" -- "$TOKEN" "$OWNER"
